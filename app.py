@@ -1,47 +1,73 @@
 import os
-import asyncio
 import streamlit as st
 import fitz  # PyMuPDF
 from transformers import pipeline
 import io
-import sentencepiece
+from concurrent.futures import ThreadPoolExecutor
 
+# Oprava pro PyTorch a asyncio
 os.environ["PYTORCH_JIT"] = "0"
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
 
-translator = pipeline("translation", model="Helsinki-NLP/opus-mt-en-cs")
-summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=-1)
+# Kontrola závislostí
+try:
+    import sentencepiece
+except ImportError:
+    st.error("❌ Chybí závislost: `sentencepiece`. Nainstalujte ji pomocí `pip install sentencepiece`.")
+    st.stop()
+
+# Nastavení modelů
+device = 0  # Pokud máte GPU, nastavte device=0, jinak použijte device=-1 pro CPU
+translator = pipeline("translation", model="Helsinki-NLP/opus-mt-en-cs", device=device)
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=device)
+
+# Použití ThreadPoolExecutor pro paralelní zpracování
+executor = ThreadPoolExecutor(max_workers=4)
 
 def extract_text_from_pdf(pdf_file):
+    # Extract text from PDF using PyMuPDF
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
     text = ""
-    try:
-        with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
-            for page in doc:
-                text += page.get_text("text") + "\n"
-    except Exception as e:
-        st.error(f"❌ Chyba při čtení PDF: {e}")
-        return None
+    for page in doc:
+        text += page.get_text()
     return text
 
 def split_text_into_chunks(text, max_length=1024):
-    sentences = text.split(". ")
+    # Split text into chunks (based on max_length)
+    words = text.split()
     chunks = []
-    chunk = ""
+    current_chunk = []
     
-    for sentence in sentences:
-        if len(chunk) + len(sentence) < max_length:
-            chunk += sentence + ". "
+    for word in words:
+        if len(" ".join(current_chunk) + " " + word) <= max_length:
+            current_chunk.append(word)
         else:
-            chunks.append(chunk.strip())
-            chunk = sentence + ". "
+            chunks.append(" ".join(current_chunk))
+            current_chunk = [word]
     
-    if chunk:
-        chunks.append(chunk.strip())
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
     
     return chunks
+
+def translate_text(text_chunks):
+    # Překlad textu pomocí ThreadPoolExecutor
+    translated_text = []
+    for chunk in text_chunks:
+        future = executor.submit(translator, chunk)
+        translated_text.append(future)
+    
+    results = [future.result() for future in translated_text]
+    return [result[0]['translation_text'] for result in results]
+
+def summarize_text(translated_chunks):
+    # Sumarizace textu pomocí ThreadPoolExecutor
+    summary = []
+    for chunk in translated_chunks:
+        future = executor.submit(summarizer, chunk, max_length=250, min_length=100, do_sample=False)
+        summary.append(future)
+    
+    results = [future.result() for future in summary]
+    return [result[0]["summary_text"] for result in results]
 
 st.title("📄 AI Sumarizátor PDF v češtině")
 st.write("Nahrajte PDF soubor a získáte automatický výtah v češtině.")
@@ -54,24 +80,27 @@ if uploaded_file:
         if extracted_text:
             text_chunks = split_text_into_chunks(extracted_text)
             
-            translated_text = ""
-            for chunk in text_chunks:
-                try:
-                    translated_part = translator(chunk)[0]['translation_text']
-                    translated_text += translated_part + "\n\n"
-                except Exception as e:
-                    st.error(f"⚠️ Chyba při překladu: {e}")
+            # Překlad
+            try:
+                translated_text = translate_text(text_chunks)
+                translated_text = "\n\n".join(translated_text)
+            except Exception as e:
+                st.error(f"⚠️ Chyba při překladu: {e}")
+                st.stop()
 
-            translated_chunks = split_text_into_chunks(translated_text)
-            summary = ""
-            for chunk in translated_chunks:
-                try:
-                    summary_part = summarizer(chunk, max_length=250, min_length=100, do_sample=False)[0]["summary_text"]
-                    summary += summary_part + "\n\n"
-                except Exception as e:
-                    st.error(f"⚠️ Chyba při sumarizaci: {e}")
+            # Sumarizace
+            try:
+                translated_chunks = split_text_into_chunks(translated_text)
+                summary = summarize_text(translated_chunks)
+                summary = "\n\n".join(summary)
+            except Exception as e:
+                st.error(f"⚠️ Chyba při sumarizaci: {e}")
+                st.stop()
 
             with st.expander("📌 Zobrazit výtah v češtině"):
                 st.write(summary)
 
             st.download_button("📥 Stáhnout výtah", summary, file_name="vytah_cz.txt")
+
+            # Tlačítko pro stažení originálního přeloženého textu
+            st.download_button("📥 Stáhnout originální CZ text", translated_text, file_name="preklad_cz.txt")
