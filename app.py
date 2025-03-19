@@ -4,29 +4,20 @@ import streamlit as st
 import fitz  # PyMuPDF
 from transformers import pipeline
 import io
+import sentencepiece
 
-# Oprava pro PyTorch a asyncio
 os.environ["PYTORCH_JIT"] = "0"
 try:
     asyncio.get_running_loop()
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-# Kontrola závislostí
-try:
-    import sentencepiece
-except ImportError:
-    st.error("❌ Chybí závislost: `sentencepiece`. Nainstalujte ji pomocí `pip install sentencepiece`.")
-    st.stop()
-
-# Nastavení modelů
 translator = pipeline("translation", model="Helsinki-NLP/opus-mt-en-cs")
 summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=-1)
 
 def extract_text_from_pdf(pdf_file):
     text = ""
     try:
-        # Převedení souboru do čitelného formátu
         with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
             for page in doc:
                 text += page.get_text("text") + "\n"
